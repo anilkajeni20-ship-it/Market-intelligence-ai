@@ -1,9 +1,22 @@
 import os, numpy as np, pandas as pd
 from datetime import datetime, timezone
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+from threading import Lock
 from fastapi.staticfiles import StaticFiles
-app=FastAPI(title='Market Intelligence AI',version='1.0.0')
+app=FastAPI(title='Market Intelligence AI',version='1.2.0')
+LIVE_QUOTES={}
+QUOTE_LOCK=Lock()
+BRIDGE_TOKEN=os.getenv('BRIDGE_TOKEN','')
+class QuotePayload(BaseModel):
+ broker:str='Exness'
+ symbol:str
+ broker_symbol:str
+ bid:float
+ ask:float
+ time:int
+
 ROOT=os.path.dirname(__file__); app.mount('/static',StaticFiles(directory=ROOT+'/static'),name='static')
 SYMS={'XAUUSD':3980.0,'NATGAS':3.45,'EURUSD':1.155,'GBPUSD':1.315,'USDJPY':153.5,'BTCUSD':105000.0}; TFS={'M5':5,'M15':15,'H1':60,'H4':240,'D1':1440}
 def demo(symbol,tf,n=350):
@@ -41,7 +54,18 @@ def analyse(d,sym,tf,source):
 @app.get('/',response_class=HTMLResponse)
 def home(): return open(ROOT+'/static/index.html').read()
 @app.get('/api/health')
-def health():return {'status':'ok','version':'1.0.0'}
+def health():return {'status':'ok','version':'1.2.0'}
+@app.post('/api/bridge/quotes')
+def receive_quote(q:QuotePayload, authorization:str|None=Header(default=None)):
+ if not BRIDGE_TOKEN: raise HTTPException(503,'Live bridge is not configured on the server')
+ if authorization != f'Bearer {BRIDGE_TOKEN}': raise HTTPException(401,'Invalid bridge token')
+ if q.bid<=0 or q.ask<=0 or q.ask<q.bid: raise HTTPException(400,'Invalid bid/ask quote')
+ item=q.model_dump(); item['received_at']=datetime.now(timezone.utc).isoformat()
+ with QUOTE_LOCK: LIVE_QUOTES[q.symbol.upper()] = item
+ return {'accepted':True,'symbol':q.symbol.upper(),'received_at':item['received_at']}
+@app.get('/api/live-quotes')
+def live_quotes():
+ with QUOTE_LOCK: return {'quotes':dict(LIVE_QUOTES),"source":"Broker quotes relayed from the MT5 terminal; quote availability depends on the laptop and terminal being online."}
 @app.get('/api/market')
 def market(symbol:str='XAUUSD',timeframe:str='M15'):
  symbol=symbol.upper(); timeframe=timeframe.upper()
